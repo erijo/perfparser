@@ -61,8 +61,10 @@ void PerfUnwind::Stats::finishedRound()
 
     maxSamplesPerRound = std::max(maxSamplesPerRound, numSamplesInRound);
     maxMmapsPerRound = std::max(maxMmapsPerRound, numMmapsInRound);
+    maxContextSwitchesPerRound = std::max(maxContextSwitchesPerRound, numContextSwitchesInRound);
     numSamplesInRound = 0;
     numMmapsInRound = 0;
+    numContextSwitchesInRound = 0;
     ++numRounds;
 
     maxTotalEventSizePerRound = std::max(maxTotalEventSizePerRound,
@@ -136,8 +138,10 @@ PerfUnwind::~PerfUnwind()
         out << "mmaps time violations: " << m_stats.numTimeViolatingMmaps << "\n";
         out << "max samples per round: " << m_stats.maxSamplesPerRound << "\n";
         out << "max mmaps per round: " << m_stats.maxMmapsPerRound << "\n";
+        out << "max context switches per round: " << m_stats.maxContextSwitchesPerRound << "\n";
         out << "max samples per flush: " << m_stats.maxSamplesPerFlush << "\n";
         out << "max mmaps per flush: " << m_stats.maxMmapsPerFlush << "\n";
+        out << "max context switches per flush: " << m_stats.maxContextSwitchesPerFlush << "\n";
         out << "max buffer size: " << m_stats.maxBufferSize << "\n";
         out << "max total event size per round: " << m_stats.maxTotalEventSizePerRound << "\n";
         out << "max time: " << m_stats.maxTime << "\n";
@@ -635,6 +639,7 @@ void PerfUnwind::flushEventBuffer(uint desiredBufferSize)
     };
     std::sort(m_mmapBuffer.begin(), m_mmapBuffer.end(), sortByTime);
     std::sort(m_sampleBuffer.begin(), m_sampleBuffer.end(), sortByTime);
+    std::sort(m_contextSwitchBuffer.begin(), m_contextSwitchBuffer.end(), sortByTime);
 
     if (m_stats.enabled) {
         for (const auto &sample : m_sampleBuffer) {
@@ -667,6 +672,9 @@ void PerfUnwind::flushEventBuffer(uint desiredBufferSize)
     auto sampleIt = m_sampleBuffer.begin();
     auto sampleEnd = m_sampleBuffer.end();
 
+    auto contextSwitchIt = m_contextSwitchBuffer.begin();
+    auto contextSwitchEnd = m_contextSwitchBuffer.end();
+
     for (; m_eventBufferSize > desiredBufferSize && sampleIt != sampleEnd; ++sampleIt) {
         const auto &sample = *sampleIt;
 
@@ -690,6 +698,13 @@ void PerfUnwind::flushEventBuffer(uint desiredBufferSize)
             m_eventBufferSize -= mmapIt->size();
         }
 
+        for (; contextSwitchIt != contextSwitchEnd && contextSwitchIt->time() <= sample.time(); ++contextSwitchIt) {
+            if (!m_stats.enabled) {
+                sendContextSwitch(*contextSwitchIt);
+            }
+            m_eventBufferSize -= contextSwitchIt->size();
+        }
+
         analyze(sample);
         m_eventBufferSize -= sample.size();
     }
@@ -700,8 +715,26 @@ void PerfUnwind::flushEventBuffer(uint desiredBufferSize)
         m_stats.maxSamplesPerFlush = std::max(samples, m_stats.maxSamplesPerFlush);
         const int mmaps = std::distance(m_mmapBuffer.begin(), mmapIt);
         m_stats.maxMmapsPerFlush = std::max(mmaps, m_stats.maxMmapsPerFlush);
+        const int contextSwitches = std::distance(m_contextSwitchBuffer.begin(), contextSwitchIt);
+        m_stats.maxContextSwitchesPerFlush = std::max(contextSwitches, m_stats.maxContextSwitchesPerFlush);
     }
 
     m_sampleBuffer.erase(m_sampleBuffer.begin(), sampleIt);
     m_mmapBuffer.erase(m_mmapBuffer.begin(), mmapIt);
+    m_contextSwitchBuffer.erase(m_contextSwitchBuffer.begin(), contextSwitchIt);
+}
+
+void PerfUnwind::contextSwitch(const PerfRecordContextSwitch& contextSwitch)
+{
+    bufferEvent(contextSwitch, &m_contextSwitchBuffer, &m_stats.numContextSwitchesInRound);
+}
+
+void PerfUnwind::sendContextSwitch(const PerfRecordContextSwitch& contextSwitch)
+{
+    QByteArray buffer;
+    QDataStream(&buffer, QIODevice::WriteOnly) << static_cast<quint8>(ContextSwitchDefinition)
+                                               << contextSwitch.pid() << contextSwitch.tid()
+                                               << contextSwitch.time()
+                                               << bool(contextSwitch.misc() & PERF_RECORD_MISC_SWITCH_OUT);
+    sendBuffer(buffer);
 }
